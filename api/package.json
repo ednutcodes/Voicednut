@@ -1,0 +1,35 @@
+{
+  "name": "api",
+  "version": "1.0.0",
+  "description": "Twilio outbound call integration with Deepgram Voice Agent API using Fastify and WebSocket",
+  "main": "call.js",
+  "scripts": {
+    "start": "node call.js",
+    "dev": "nodemon call.js"
+  },
+  "dependencies": {
+    "@fastify/formbody": "^8.0.2",
+    "@fastify/websocket": "^11.2.0",
+    "dotenv": "^16.3.1",
+    "fastify": "^5.4.0",
+    "twilio": "^4.15.0",
+    "ws": "^8.15.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "fastify",
+    "twilio",
+    "deepgram",
+    "websocket",
+    "voice",
+    "ai",
+    "agent"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
