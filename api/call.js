@@ -14,7 +14,12 @@ const {
   TWILIO_PHONE_NUMBER,
 } = process.env;
 
-if (!DEEPGRAM_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
+if (
+  !DEEPGRAM_API_KEY ||
+  !TWILIO_ACCOUNT_SID ||
+  !TWILIO_AUTH_TOKEN ||
+  !TWILIO_PHONE_NUMBER
+) {
   console.error("Missing required environment variables");
   throw new Error("Missing required environment variables");
 }
@@ -31,10 +36,11 @@ fastify.get("/", async (_, reply) => reply.send({ message: "Server is running" }
 fastify.post("/outbound-call", async (request, reply) => {
   const { number, prompt, first_message } = request.body;
 
-  if (!number) return reply.code(400).send({ error: "Phone number is required" });
+  if (!number) {
+    return reply.code(400).send({ error: "Phone number is required" });
+  }
 
   try {
-    // Twilio API: https://www.twilio.com/docs/voice/api/call-resource#make-an-outbound-call
     const call = await twilioClient.calls.create({
       from: TWILIO_PHONE_NUMBER,
       to: number,
@@ -54,7 +60,6 @@ fastify.all("/outbound-call-twiml", async (req, reply) => {
   const prompt = req.query.prompt || "";
   const first_message = req.query.first_message || "";
 
-  // Twilio expects valid TwiML
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
@@ -68,7 +73,6 @@ fastify.all("/outbound-call-twiml", async (req, reply) => {
   reply.type("text/xml").send(twiml);
 });
 
-// Deepgram Voice Agent API: https://developers.deepgram.com/docs/voice-agent-api
 fastify.register(async instance => {
   instance.get("/outbound-media-stream", { websocket: true }, (ws, req) => {
     console.info("Twilio connected to media stream");
@@ -78,7 +82,18 @@ fastify.register(async instance => {
     let deepgramWs = null;
     let keepAliveInterval = null;
 
-    const openDeepgram = async () => {
+    const closeDeepgram = () => {
+      if (deepgramWs) {
+        deepgramWs.close();
+        deepgramWs = null;
+      }
+      if (keepAliveInterval) {
+        clearInterval(keepAliveInterval);
+        keepAliveInterval = null;
+      }
+    };
+
+    const openDeepgram = () => {
       deepgramWs = new WebSocket("wss://agent.deepgram.com/v1/agent/converse", {
         headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
       });
@@ -86,12 +101,9 @@ fastify.register(async instance => {
       deepgramWs.on("open", () => {
         console.log("[Deepgram] Connected");
 
-        // Only use prompt for instructions, fallback to default if missing
-        let instructions = "You are a helpful assistant.";
-        if (typeof customParameters.prompt === "string" && customParameters.prompt.trim()) {
-          instructions = customParameters.prompt.trim();
-        }
+        const userPrompt = customParameters.prompt?.trim() || "You are a helpful assistant.";
 
+        // --- FIXED SETTINGS MESSAGE BASED ON LATEST DEEPGRAM DOCS ---
         const settings = {
           type: "Settings",
           audio: {
@@ -99,14 +111,36 @@ fastify.register(async instance => {
             output: { encoding: "base64", sample_rate: 8000 },
           },
           agent: {
-            instructions,
-            listen_model: "nova",
-            think_model: "gpt-4",
-            speak_model: "aura"
+            language: "en-US",
+            // The `listen` object requires a `provider` object.
+            listen: {
+              provider: {
+                type: "deepgram",
+                model: "nova-2",
+              },
+            },
+            // The `think` and `speak` models can be direct properties when using
+            // Deepgram's internal LLM and TTS models.
+            think: {
+              model: "gpt-4",
+              prompt: userPrompt,
+            },
+            speak: {
+              model: "aura-2-thalia-en"
+            }
           },
         };
 
         deepgramWs.send(JSON.stringify(settings));
+
+        if (typeof customParameters.first_message === "string" && customParameters.first_message.trim()) {
+          deepgramWs.send(
+            JSON.stringify({
+              type: "Utterance",
+              text: customParameters.first_message.trim(),
+            })
+          );
+        }
 
         keepAliveInterval = setInterval(() => {
           deepgramWs.send(JSON.stringify({ type: "KeepAlive" }));
@@ -114,43 +148,42 @@ fastify.register(async instance => {
       });
 
       deepgramWs.on("message", data => {
-        let msg;
         try {
-          msg = JSON.parse(data);
+          const msg = JSON.parse(data);
+
+          switch (msg.type) {
+            case "Utterance":
+              console.log("[Deepgram] Conversation Text:", msg.text);
+              break;
+            case "AgentAudio":
+              if (msg.audio?.payload) {
+                ws.send(
+                  JSON.stringify({
+                    event: "media",
+                    streamSid,
+                    media: { payload: msg.audio.payload },
+                  })
+                );
+              }
+              break;
+            case "AgentThinking":
+              console.log("[Deepgram] Thinking...");
+              break;
+            case "Error":
+              console.error("[Deepgram] Error:", msg.message || msg.description || "No error message provided");
+              ws.close();
+              closeDeepgram();
+              break;
+          }
         } catch (err) {
           console.error("[Deepgram] Invalid JSON:", err);
-          return;
-        }
-
-        switch (msg.type) {
-          case "AgentStartedSpeaking":
-          case "AgentAudioDone":
-            if (msg.audio?.payload) {
-              ws.send(
-                JSON.stringify({
-                  event: "media",
-                  streamSid,
-                  media: { payload: msg.audio.payload },
-                })
-              );
-            }
-            break;
-          case "ConversationText":
-            console.log("[Deepgram] Text:", msg.text);
-            break;
-          case "AgentThinking":
-            console.log("[Deepgram] Thinking...");
-            break;
-          case "Error":
-            // Improved error logging
-            console.error("[Deepgram] Error object:", msg);
-            console.error("[Deepgram] Error:", msg.message || msg.description || "No error message provided");
-            break;
         }
       });
 
       deepgramWs.on("error", err => {
         console.error("[Deepgram] WebSocket error:", err);
+        ws.close();
+        closeDeepgram();
       });
 
       deepgramWs.on("close", () => {
@@ -159,9 +192,10 @@ fastify.register(async instance => {
       });
     };
 
-    openDeepgram();
-
-    ws.on("error", console.error);
+    ws.on("error", err => {
+      console.error("[Twilio] WebSocket error:", err);
+      closeDeepgram();
+    });
 
     ws.on("message", message => {
       try {
@@ -171,18 +205,19 @@ fastify.register(async instance => {
           streamSid = msg.start.streamSid;
           customParameters = msg.start.customParameters || {};
           console.log("Stream started:", streamSid, customParameters);
+          openDeepgram();
         } else if (msg.event === "media") {
           if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
             deepgramWs.send(
               JSON.stringify({
-                type: "Speak",
+                type: "Audio",
                 audio: { payload: msg.media.payload },
               })
             );
           }
         } else if (msg.event === "stop") {
           console.log("Stream stopped:", streamSid);
-          if (deepgramWs) deepgramWs.close();
+          closeDeepgram();
         }
       } catch (err) {
         console.error("Error processing Twilio msg:", err);
@@ -191,7 +226,7 @@ fastify.register(async instance => {
 
     ws.on("close", () => {
       console.log("Twilio WS closed");
-      if (deepgramWs) deepgramWs.close();
+      closeDeepgram();
     });
   });
 });
