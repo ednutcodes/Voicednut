@@ -103,30 +103,34 @@ fastify.register(async instance => {
 
         const userPrompt = customParameters.prompt?.trim() || "You are a helpful assistant.";
 
-        // --- FIXED SETTINGS MESSAGE BASED ON LATEST DEEPGRAM DOCS ---
         const settings = {
           type: "Settings",
           audio: {
-            input: { encoding: "base64", sample_rate: 8000 },
-            output: { encoding: "base64", sample_rate: 8000 },
+            input: { encoding: "linear16", sample_rate: 8000 },
+            output: { encoding: "linear16", sample_rate: 8000 },
           },
           agent: {
             language: "en-US",
-            // The `listen` object requires a `provider` object.
             listen: {
               provider: {
                 type: "deepgram",
                 model: "nova-2",
               },
             },
-            // The `think` and `speak` models can be direct properties when using
-            // Deepgram's internal LLM and TTS models.
             think: {
-              model: "gpt-4",
-              prompt: userPrompt,
+              provider: {
+                type: "open_ai", // Or "open_ai", "anthropic", etc. if using external LLMs
+                model: "gpt-4o-mini", // For Deepgram-managed LLM
+                temperature: 0.7
+              },
+             prompt: userPrompt, 
             },
+            // Corrected agent.speak configuration based on Deepgram documentation
             speak: {
-              model: "aura-2-thalia-en"
+              provider: {
+                type: "deepgram",
+                model: "aura-2-thalia-en"
+              }
             }
           },
         };
@@ -143,8 +147,10 @@ fastify.register(async instance => {
         }
 
         keepAliveInterval = setInterval(() => {
-          deepgramWs.send(JSON.stringify({ type: "KeepAlive" }));
-        }, 20000);
+          if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+            deepgramWs.send(JSON.stringify({ type: "KeepAlive" }));
+          }
+        }, 10000);
       });
 
       deepgramWs.on("message", data => {
